@@ -1,0 +1,518 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+//
+// Tideprint  —  successor to Wen2Trade (W2T)
+// Overlay confluence for crypto: MA stack + SuperTrend structure + confirmed
+// momentum / money-flow prints. Pine Script v6.
+//
+// Public building blocks (not proprietary):
+//   • WaveTrend oscillator — LazyBear (open-source)
+//   • Money Flow Index    — standard MFI
+//   • Session VWAP        — standard VWAP
+//   • Kaufman Efficiency Ratio, ADX, ATR, CCI, MACD, TEMA, HMA, SuperTrend
+// Tideprint does NOT clone Market Cipher B visuals or any closed-source formula.
+//
+// Signals fire on confirmed bars by default (no lookahead, no HTF leak).
+// v6.1 — plot-count fix (RE10140). Signals are labels, not plotshape.
+//         Const-color plots, no color?na ternaries, data-window trimmed.
+
+//@version=6
+indicator("Tideprint", shorttitle = "TIDE", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 50)
+
+// =============================================================================
+// 1. INPUTS
+// =============================================================================
+
+grpProfile  = "1. Profile"
+grpVis      = "2. Visuals"
+grpMA       = "3. Moving averages"
+grpST       = "4. SuperTrend structure"
+grpMom      = "5. Momentum & money flow"
+grpStruct   = "6. Pivots"
+grpRegime   = "7. Regime & filters"
+grpSig      = "8. Signals"
+grpDash     = "9. Dashboard"
+
+string profile = input.string("Intraday", "Trading profile", options = ["Scalp", "Intraday", "Swing", "Custom"], group = grpProfile, tooltip = "Scalp: 1m–5m with 3m HTF. Intraday: 5m–1h with 1h HTF. Swing: 4h–D with daily HTF. Custom uses the HTF you set below.")
+string customHtf = input.timeframe("60", "Custom higher timeframe", group = grpProfile)
+bool   showUnconfirmed = input.bool(false, "Preview signals on forming bar", group = grpProfile, tooltip = "OFF = prints and alerts only when the chart bar closes (recommended). ON = live preview that can disappear before the close.")
+
+bool showClouds     = input.bool(true,  "MA clouds",            group = grpVis)
+bool showMALines    = input.bool(false, "Show all MA lines",    group = grpVis)
+bool showSTClouds   = input.bool(false, "SuperTrend clouds",    group = grpVis)
+bool showSTLine     = input.bool(true,  "Outer SuperTrend line", group = grpVis)
+bool showVWAP       = input.bool(true,  "Session VWAP",         group = grpVis)
+bool showBarColor   = input.bool(false, "Color bars by flow",   group = grpVis)
+bool showPivots     = input.bool(true,  "Confirmed swing pivots", group = grpVis)
+bool showDash       = input.bool(true,  "Dashboard",            group = grpVis)
+bool showScoreRibbon= input.bool(true,  "Confluence ribbon (bg)", group = grpVis)
+
+string maType = input.string("EMA", "MA method", options = ["SMA", "EMA", "RMA", "WMA", "VWMA", "HMA"], group = grpMA)
+float  maSrc  = input.source(close, "MA source", group = grpMA)
+int maLen1 = input.int(14,  "MA 1", minval = 1, group = grpMA, inline = "ma1")
+int maLen2 = input.int(21,  "MA 2", minval = 1, group = grpMA, inline = "ma1")
+int maLen3 = input.int(34,  "MA 3", minval = 1, group = grpMA, inline = "ma2")
+int maLen4 = input.int(50,  "MA 4", minval = 1, group = grpMA, inline = "ma2")
+int maLen5 = input.int(100, "MA 5", minval = 1, group = grpMA, inline = "ma3")
+int maLen6 = input.int(170, "MA 6", minval = 1, group = grpMA, inline = "ma3")
+
+int hmaFast = input.int(6,   "HMA fast",   minval = 2, group = grpMA, inline = "hma")
+int hmaMid  = input.int(12,  "HMA mid",    minval = 2, group = grpMA, inline = "hma")
+int hmaSlow = input.int(80,  "HMA slow",   minval = 2, group = grpMA, inline = "hma")
+int hmaTrend= input.int(140, "HMA trend",  minval = 2, group = grpMA)
+
+int tema1Len = input.int(25,  "TEMA 1", minval = 1, group = grpMA, inline = "te")
+int tema2Len = input.int(34,  "TEMA 2", minval = 1, group = grpMA, inline = "te")
+int tema3Len = input.int(50,  "TEMA 3", minval = 1, group = grpMA, inline = "te2")
+int tema4Len = input.int(100, "TEMA 4", minval = 1, group = grpMA, inline = "te2")
+int tema5Len = input.int(200, "TEMA 5", minval = 1, group = grpMA)
+
+int   stAtr1 = input.int(10, "ST1 ATR", minval = 1, group = grpST, inline = "st1")
+float stFac1 = input.float(1.0, "Factor", minval = 0.1, step = 0.1, group = grpST, inline = "st1")
+int   stAtr2 = input.int(11, "ST2 ATR", minval = 1, group = grpST, inline = "st2")
+float stFac2 = input.float(2.0, "Factor", minval = 0.1, step = 0.1, group = grpST, inline = "st2")
+int   stAtr3 = input.int(12, "ST3 ATR", minval = 1, group = grpST, inline = "st3")
+float stFac3 = input.float(3.0, "Factor", minval = 0.1, step = 0.1, group = grpST, inline = "st3")
+bool  adaptiveST = input.bool(true, "Block continuation prints in high-vol cascades", group = grpST, tooltip = "When ATR% is elevated versus its own average, Tide Long/Short continuation prints are suppressed so SuperTrend whip does not become a signal. Flow dots still print.")
+
+int   wtChannel = input.int(10, "WaveTrend channel", minval = 1, group = grpMom)
+int   wtAverage = input.int(21, "WaveTrend average", minval = 1, group = grpMom)
+int   mfiLen    = input.int(14, "MFI length", minval = 1, group = grpMom)
+int   cciLen    = input.int(50, "CCI length", minval = 1, group = grpMom)
+int   macdFast  = input.int(12, "MACD fast", minval = 1, group = grpMom, inline = "macd")
+int   macdSlow  = input.int(20, "MACD slow", minval = 1, group = grpMom, inline = "macd")
+int   macdSig   = input.int(9,  "Signal",    minval = 1, group = grpMom, inline = "macd")
+float wtOb      = input.float(60.0,  "WT overbought",  group = grpMom, inline = "wtz")
+float wtOs      = input.float(-60.0, "WT oversold",    group = grpMom, inline = "wtz")
+
+int pivotL = input.int(5,  "Pivot left",  minval = 2, group = grpStruct, inline = "pv")
+int pivotR = input.int(5,  "Pivot right", minval = 2, group = grpStruct, inline = "pv")
+int pivotLarge = input.int(34, "Large swing", minval = 5, group = grpStruct)
+
+int   adxLen    = input.int(14, "ADX length", minval = 1, group = grpRegime)
+float adxThresh = input.float(22.0, "ADX trend threshold", minval = 1, group = grpRegime)
+int   erLen     = input.int(14, "Efficiency ratio length", minval = 2, group = grpRegime)
+float erThresh  = input.float(0.30, "ER trend threshold", minval = 0.05, step = 0.05, group = grpRegime)
+int   volLen    = input.int(20, "Relative volume length", minval = 2, group = grpRegime)
+float volMin    = input.float(0.80, "Min relative volume", minval = 0.0, step = 0.1, group = grpRegime)
+bool  useRegime = input.bool(true,  "Filter trend-signals with regime", group = grpRegime)
+bool  useVolume = input.bool(true,  "Require volume on continuation prints", group = grpRegime)
+bool  useSession= input.bool(false, "Restrict continuation prints to session", group = grpRegime)
+string sessWin  = input.session("0700-1600", "Session (exchange TZ)", group = grpRegime)
+int   cooldown  = input.int(5, "Bars between same-side prints", minval = 0, group = grpRegime)
+
+int  minScoreLong  = input.int(7, "Min score for Tide Long",  minval = 1, maxval = 12, group = grpSig)
+int  minScoreShort = input.int(7, "Min score for Tide Short", minval = 1, maxval = 12, group = grpSig)
+bool showTidePrints= input.bool(true,  "Tide Long / Short",     group = grpSig)
+bool showFlowDots  = input.bool(true,  "Flow dots (WT + MFI)",  group = grpSig)
+bool showStructX   = input.bool(true,  "Structure X prints",    group = grpSig)
+bool showSTPrints  = input.bool(true,  "ST Long / ST Short",    group = grpSig)
+bool showDiv       = input.bool(true,  "Divergences",           group = grpSig)
+
+string dashPos = input.string("top_right", "Dashboard corner", options = ["top_right", "top_left", "bottom_right", "bottom_left"], group = grpDash)
+
+color colLong  = input.color(#3dffa0, "Long",  group = grpDash, inline = "c")
+color colShort = input.color(#ff5c7a, "Short", group = grpDash, inline = "c")
+color colNeut  = input.color(#8b9178, "Neutral", group = grpDash, inline = "c")
+color colAccent= input.color(#c8f542, "Accent", group = grpDash)
+
+// =============================================================================
+// 2. HELPERS
+// =============================================================================
+
+f_ma(float src, int len, string typ) =>
+    switch typ
+        "SMA"  => ta.sma(src, len)
+        "EMA"  => ta.ema(src, len)
+        "RMA"  => ta.rma(src, len)
+        "WMA"  => ta.wma(src, len)
+        "VWMA" => ta.vwma(src, len)
+        "HMA"  => ta.hma(src, len)
+        => ta.ema(src, len)
+
+f_tema(float src, int len) =>
+    float e1 = ta.ema(src, len)
+    float e2 = ta.ema(e1, len)
+    float e3 = ta.ema(e2, len)
+    3.0 * e1 - 3.0 * e2 + e3
+
+f_wt(float src, int chLen, int avgLen) =>
+    float esa = ta.ema(src, chLen)
+    float d   = ta.ema(math.abs(src - esa), chLen)
+    float ci  = d <= 0 ? 0.0 : (src - esa) / (0.015 * d)
+    float w1  = ta.ema(ci, avgLen)
+    float w2  = ta.sma(w1, 4)
+    [w1, w2]
+
+f_htf() =>
+    string tf = switch profile
+        "Scalp"    => "3"
+        "Intraday" => "60"
+        "Swing"    => "1D"
+        => customHtf
+    tf
+
+// Evaluate WT / MFI / CCI on the higher timeframe itself.
+htfPack() =>
+    float esa = ta.ema(hlc3, wtChannel)
+    float dev = ta.ema(math.abs(hlc3 - esa), wtChannel)
+    float ci  = dev <= 0 ? 0.0 : (hlc3 - esa) / (0.015 * dev)
+    float w1  = ta.ema(ci, wtAverage)
+    float mf  = ta.mfi(hlc3, mfiLen)
+    float cc  = ta.cci(ohlc4, cciLen)
+    [w1[1], mf[1], cc[1]]
+
+string htfTf = f_htf()
+
+// lookahead_on + [1] inside the pack: last CLOSED HTF bar, historical == realtime.
+[htfWt1, htfMfi, htfCci] = request.security(syminfo.tickerid, htfTf, htfPack(), barmerge.gaps_off, barmerge.lookahead_on)
+
+bool inSession = not useSession or not na(time(timeframe.period, sessWin, syminfo.timezone))
+bool barReady  = showUnconfirmed or barstate.isconfirmed
+
+// =============================================================================
+// 3. CORE SERIES
+// =============================================================================
+
+float ema1 = f_ma(maSrc, maLen1, maType)
+float ema2 = f_ma(maSrc, maLen2, maType)
+float ema3 = f_ma(maSrc, maLen3, maType)
+float ema4 = f_ma(maSrc, maLen4, maType)
+float ema5 = f_ma(maSrc, maLen5, maType)
+float ema6 = f_ma(maSrc, maLen6, maType)
+
+float hFast  = ta.hma(close, hmaFast)
+float hMid   = ta.hma(close, hmaMid)
+float hSlow  = ta.hma(close, hmaSlow)
+float hTrend = ta.hma(close, hmaTrend)
+
+float t1 = f_tema(close, tema1Len)
+float t2 = f_tema(close, tema2Len)
+float t3 = f_tema(close, tema3Len)
+float t4 = f_tema(close, tema4Len)
+float t5 = f_tema(close, tema5Len)
+
+float atrPct = 100.0 * ta.atr(14) / math.max(close, syminfo.mintick)
+float atrPctAvg = ta.sma(atrPct, 50)
+
+[st1, dir1] = ta.supertrend(stFac1, stAtr1)
+[st2, dir2] = ta.supertrend(stFac2, stAtr2)
+[st3, dir3] = ta.supertrend(stFac3, stAtr3)
+
+bool stBull = dir1 < 0 and dir2 < 0 and dir3 < 0
+bool stBear = dir1 > 0 and dir2 > 0 and dir3 > 0
+
+[wt1, wt2] = f_wt(hlc3, wtChannel, wtAverage)
+float mfi    = ta.mfi(hlc3, mfiLen)
+float cci    = ta.cci(ohlc4, cciLen)
+
+float macdLine = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+float macdSignal = ta.ema(macdLine, macdSig)
+float macdHist = macdLine - macdSignal
+// Price-normalized MACD so a zero-cross means the same thing on BTC, ETH, and alts.
+float macdPct = close != 0 ? 100.0 * macdLine / close : 0.0
+
+float vwapVal = ta.vwap(hlc3)
+
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+float erNum = math.abs(close - close[erLen])
+float erDen = math.sum(math.abs(close - close[1]), erLen)
+float er    = erDen <= 0 ? 0.0 : erNum / erDen
+float relVol = ta.sma(volume, volLen) > 0 ? volume / ta.sma(volume, volLen) : 1.0
+
+bool regimeTrend = adx >= adxThresh and er >= erThresh
+bool regimeChop  = adx < adxThresh
+bool regimeVol   = atrPct > atrPctAvg * 1.6
+
+bool  htfBull = htfWt1 > 0 and htfMfi > 50 and htfCci > 0
+bool  htfBear = htfWt1 < 0 and htfMfi < 50 and htfCci < 0
+
+// =============================================================================
+// 4. TRANSPARENT CONFLUENCE SCORE  (0–12)
+// =============================================================================
+
+bool cMA      = ema3 > ema6 and ema2 > ema4
+bool cHMA     = hFast > hSlow and hSlow > hTrend
+bool cST      = stBull
+bool cTEMA    = t1 > t2 and t2 > t3 and t4 > t5
+bool cCCI     = cci > 0
+bool cMACD    = macdLine > 0 and macdLine > macdSignal
+bool cWT      = wt1 > wt2 and wt1 > 0
+bool cMFI     = mfi > 50
+bool cHTF     = htfBull
+bool cVWAP    = close > vwapVal
+bool cADX     = regimeTrend
+bool cVol     = relVol >= volMin
+
+bool sMA      = ema3 < ema6 and ema2 < ema4
+bool sHMA     = hFast < hSlow and hSlow < hTrend
+bool sST      = stBear
+bool sTEMA    = t1 < t2 and t2 < t3 and t4 < t5
+bool sCCI     = cci < 0
+bool sMACD    = macdLine < 0 and macdLine < macdSignal
+bool sWT      = wt1 < wt2 and wt1 < 0
+bool sMFI     = mfi < 50
+bool sHTF     = htfBear
+bool sVWAP    = close < vwapVal
+bool sADX     = regimeTrend
+bool sVol     = relVol >= volMin
+
+int scoreLong  = (cMA ? 1 : 0) + (cHMA ? 1 : 0) + (cST ? 1 : 0) + (cTEMA ? 1 : 0) + (cCCI ? 1 : 0) + (cMACD ? 1 : 0) + (cWT ? 1 : 0) + (cMFI ? 1 : 0) + (cHTF ? 1 : 0) + (cVWAP ? 1 : 0) + (cADX ? 1 : 0) + (cVol ? 1 : 0)
+int scoreShort = (sMA ? 1 : 0) + (sHMA ? 1 : 0) + (sST ? 1 : 0) + (sTEMA ? 1 : 0) + (sCCI ? 1 : 0) + (sMACD ? 1 : 0) + (sWT ? 1 : 0) + (sMFI ? 1 : 0) + (sHTF ? 1 : 0) + (sVWAP ? 1 : 0) + (sADX ? 1 : 0) + (sVol ? 1 : 0)
+
+string biasStr = scoreLong - scoreShort >= 3 ? "LONG" : scoreShort - scoreLong >= 3 ? "SHORT" : "NEUTRAL"
+string regimeStr = regimeVol ? "HIGH VOL" : regimeTrend ? "TREND" : "CHOP"
+
+// =============================================================================
+// 5. SIGNAL LOGIC
+// =============================================================================
+
+bool volOk     = not useVolume or relVol >= volMin
+bool regimeOkL = not useRegime or regimeTrend
+bool regimeOkS = not useRegime or regimeTrend
+bool sessOk    = inSession
+
+// Continuation family (original Super Long / SHORT100 DNA, cleaned)
+bool tideLongRaw  = ta.crossover(macdPct, 0) and scoreLong >= minScoreLong and ema3 > ema6 and hFast > ema6 and cci > 0 and t1 > t2 and volOk and regimeOkL and sessOk and (not adaptiveST or not regimeVol)
+bool tideShortRaw = ta.crossunder(macdPct, 0) and scoreShort >= minScoreShort and hFast < st3 and hFast < st1 and close < open and volOk and regimeOkS and sessOk and (not adaptiveST or not regimeVol)
+
+// Original ST family: SuperTrend alignment + CCI zero + HTF money-flow
+bool stLongRaw  = ta.crossover(cci, 0) and htfCci > 0 and hFast > hMid and stBull and close > open and sessOk
+bool stShortRaw = ta.crossunder(cci, 0) and htfCci < 0 and hFast < hMid and stBear and close < open and sessOk
+
+// Structure X: inner SuperTrend flipping through outer (original SupertrendUp/Down)
+bool xLongRaw  = ta.crossunder(st3, st1) and dir1 < 0 and close > open and cci > 0
+bool xShortRaw = ta.crossover(st3, st1) and dir1 > 0 and close < open and cci < 0
+
+// Flow dots — public WT + MFI confluence (NOT Cipher visual language)
+bool flowLongRaw  = ta.crossover(wt1, wt2) and wt2 <= wtOs and mfi > 45 and mfi > mfi[1]
+bool flowShortRaw = ta.crossunder(wt1, wt2) and wt2 >= wtOb and mfi < 55 and mfi < mfi[1]
+
+// Bear print (original SHORT3min / Bear): CCI lose-zero with structure broken
+bool bearRaw = ta.crossunder(cci, 0) and htfCci < 0 and hFast < hMid and stBear
+
+// Cooldown so a cluster of conditions does not stampede
+var int lastLongBar  = 0
+var int lastShortBar = 0
+bool cdLong  = bar_index - lastLongBar  >= cooldown
+bool cdShort = bar_index - lastShortBar >= cooldown
+
+bool tideLong  = tideLongRaw  and barReady and cdLong
+bool tideShort = tideShortRaw and barReady and cdShort
+bool stLong    = stLongRaw    and barReady and cdLong
+bool stShort   = stShortRaw   and barReady and cdShort
+bool xLong     = xLongRaw     and barReady
+bool xShort    = xShortRaw    and barReady
+bool flowLong  = flowLongRaw  and barReady
+bool flowShort = flowShortRaw and barReady
+bool bearPrint = bearRaw      and barReady and cdShort
+
+if tideLong or stLong or flowLong
+    lastLongBar := bar_index
+if tideShort or stShort or bearPrint or flowShort
+    lastShortBar := bar_index
+
+// =============================================================================
+// 6. DIVERGENCES  (confirmed pivots — no lookahead)
+// =============================================================================
+
+float phPrice = ta.pivothigh(high, pivotL, pivotR)
+float plPrice = ta.pivotlow(low, pivotL, pivotR)
+float phWt    = ta.pivothigh(wt1, pivotL, pivotR)
+float plWt    = ta.pivotlow(wt1, pivotL, pivotR)
+
+var float lastPhPrice = na
+var float lastPlPrice = na
+var float lastPhWt    = na
+var float lastPlWt    = na
+var int   lastPhBar   = 0
+var int   lastPlBar   = 0
+var int   prevPhBar   = 0
+var int   prevPlBar   = 0
+var float prevPhPrice = na
+var float prevPlPrice = na
+
+bool bullRegDiv = false
+bool bearRegDiv = false
+bool bullHidDiv = false
+bool bearHidDiv = false
+
+if not na(phPrice) and not na(phWt)
+    if not na(lastPhPrice) and not na(lastPhWt)
+        bearRegDiv := high[pivotR] > lastPhPrice and phWt < lastPhWt
+        bearHidDiv := high[pivotR] < lastPhPrice and phWt > lastPhWt
+        prevPhBar   := lastPhBar
+        prevPhPrice := lastPhPrice
+    lastPhPrice := high[pivotR]
+    lastPhWt    := phWt
+    lastPhBar   := bar_index - pivotR
+
+if not na(plPrice) and not na(plWt)
+    if not na(lastPlPrice) and not na(lastPlWt)
+        bullRegDiv := low[pivotR] < lastPlPrice and plWt > lastPlWt
+        bullHidDiv := low[pivotR] > lastPlPrice and plWt < lastPlWt
+        prevPlBar   := lastPlBar
+        prevPlPrice := lastPlPrice
+    lastPlPrice := low[pivotR]
+    lastPlWt    := plWt
+    lastPlBar   := bar_index - pivotR
+
+bullRegDiv := bullRegDiv and barReady
+bearRegDiv := bearRegDiv and barReady
+bullHidDiv := bullHidDiv and showDiv and barReady
+bearHidDiv := bearHidDiv and showDiv and barReady
+
+if showDiv and bullRegDiv and not na(prevPlPrice)
+    line.new(prevPlBar, prevPlPrice, bar_index - pivotR, low[pivotR], color = colLong, width = 1, style = line.style_dotted)
+if showDiv and bearRegDiv and not na(prevPhPrice)
+    line.new(prevPhBar, prevPhPrice, bar_index - pivotR, high[pivotR], color = colShort, width = 1, style = line.style_dotted)
+
+// =============================================================================
+// 7. PIVOT MARKERS  (confirmed only — original semafor intent, no repaint)
+// =============================================================================
+
+float swingHi = ta.pivothigh(high, pivotLarge, pivotLarge)
+float swingLo = ta.pivotlow(low, pivotLarge, pivotLarge)
+float midHi   = ta.pivothigh(high, pivotL + 3, pivotR + 3)
+float midLo   = ta.pivotlow(low, pivotL + 3, pivotR + 3)
+
+if showPivots and not na(swingHi)
+    label.new(bar_index - pivotLarge, swingHi, "", style = label.style_circle, color = color.new(colShort, 20), size = size.small)
+if showPivots and not na(swingLo)
+    label.new(bar_index - pivotLarge, swingLo, "", style = label.style_circle, color = color.new(colLong, 20), size = size.small)
+if showPivots and not na(midHi)
+    label.new(bar_index - (pivotR + 3), midHi, "", style = label.style_circle, color = color.new(colAccent, 55), size = size.tiny)
+if showPivots and not na(midLo)
+    label.new(bar_index - (pivotR + 3), midLo, "", style = label.style_circle, color = color.new(colAccent, 55), size = size.tiny)
+
+// =============================================================================
+// 8. PLOTS  (budget ~30 of 64 — see header)
+//     Rule: const colors only on plot(). Hide by na-ing the SERIES, never the color.
+//     Signals are labels (section 8b) so they cost 0 plot counts.
+// =============================================================================
+
+plot(showVWAP ? vwapVal : na, "VWAP", #c8f54280, 1)
+
+// One plot per MA: hidden via display (const) so fill() still works. Never ternary the color.
+ema1p = plot(ema1, "MA1", #4df2f266, 1, display = showMALines ? display.all - display.status_line : display.none)
+ema2p = plot(ema2, "MA2", #4df2f266, 1, display = showMALines ? display.all - display.status_line : display.none)
+ema3p = plot(ema3, "MA3", #4df2f2cc, 1, display = showMALines ? display.all - display.status_line : display.none)
+ema4p = plot(ema4, "MA4", #bc6bfd,   1, display = showMALines ? display.all - display.status_line : display.none)
+ema5p = plot(ema5, "MA5", #f1f1ff80, 1, display = showMALines ? display.all - display.status_line : display.none)
+ema6p = plot(ema6, "MA6", #7674f7,   3, display = showMALines ? display.all - display.status_line : display.none)
+
+fill(ema1p, ema2p, showClouds ? (ema1 > ema2 ? #46f8c338 : #f337372e) : na, title = "Fast cloud")
+fill(ema3p, ema4p, showClouds ? (ema3 > ema4 ? #46f8a538 : #f149892e) : na, title = "Mid cloud")
+fill(ema5p, ema6p, showClouds ? (ema5 > ema6 ? #162df82e : #e230fa2e) : na, title = "Slow cloud")
+
+bodyMid = plot((open + close) * 0.5, "Body", display = display.none, editable = false)
+st1p    = plot(st1, "ST1", display = display.none, editable = false)
+st3p    = plot(st3, "ST3", #1b9cd480, 2, display = showSTLine ? display.all - display.status_line : display.none)
+
+fill(bodyMid, st1p, showSTClouds ? (dir1 < 0 ? #4c60af2e : #ff00002e) : na, title = "ST cloud inner")
+fill(bodyMid, st3p, showSTClouds ? (dir3 < 0 ? #4c60af1f : #ff00001f) : na, title = "ST cloud outer")
+
+barcolor(showBarColor ? (mfi > 50 and wt1 > wt2 ? color.new(colLong, 55) : mfi < 50 and wt1 < wt2 ? color.new(colShort, 55) : na) : na)
+bgcolor(showScoreRibbon ? (biasStr == "LONG" ? color.new(colLong, 94) : biasStr == "SHORT" ? color.new(colShort, 94) : na) : na)
+
+// Alert-template + data window only. Do not add more — each plot() is a count.
+plot(scoreLong,  "Score Long",  display = display.data_window)
+plot(scoreShort, "Score Short", display = display.data_window)
+
+// =============================================================================
+// 8b. SIGNAL LABELS  (0 plot counts)
+//     Permanent stamps on confirmed bars. Forming-bar previews are deleted
+//     every tick so they cannot stick if the condition dies before the close.
+// =============================================================================
+
+var array<label> preview = array.new<label>()
+if array.size(preview) > 0
+    for i = 0 to array.size(preview) - 1
+        label.delete(array.get(preview, i))
+    array.clear(preview)
+
+bool stamp = barstate.isconfirmed
+bool live  = showUnconfirmed and not barstate.isconfirmed
+bool draw  = stamp or live
+
+if draw and showTidePrints and tideLong
+    label tideL = label.new(bar_index, 0, "TIDE", xloc = xloc.bar_index, yloc = yloc.belowbar, color = colLong, style = label.style_label_up, textcolor = color.white, size = size.small)
+    if live
+        array.push(preview, tideL)
+if draw and showTidePrints and tideShort
+    label tideS = label.new(bar_index, 0, "TIDE", xloc = xloc.bar_index, yloc = yloc.abovebar, color = colShort, style = label.style_label_down, textcolor = color.white, size = size.small)
+    if live
+        array.push(preview, tideS)
+if draw and showSTPrints and stLong
+    label stL = label.new(bar_index, 0, "ST", xloc = xloc.bar_index, yloc = yloc.belowbar, color = #e597ff, style = label.style_label_up, textcolor = color.white, size = size.tiny)
+    if live
+        array.push(preview, stL)
+if draw and showSTPrints and stShort
+    label stS = label.new(bar_index, 0, "ST", xloc = xloc.bar_index, yloc = yloc.abovebar, color = #ff9797, style = label.style_label_down, textcolor = color.white, size = size.tiny)
+    if live
+        array.push(preview, stS)
+if draw and showStructX and xLong
+    label xL = label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.belowbar, color = #99fffa, style = label.style_xcross, size = size.tiny)
+    if live
+        array.push(preview, xL)
+if draw and showStructX and xShort
+    label xS = label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.abovebar, color = #fd9c8f, style = label.style_xcross, size = size.tiny)
+    if live
+        array.push(preview, xS)
+if draw and showSTPrints and bearPrint
+    label bearL = label.new(bar_index, 0, "BEAR", xloc = xloc.bar_index, yloc = yloc.abovebar, color = #fd2f2f, style = label.style_label_down, textcolor = color.white, size = size.tiny)
+    if live
+        array.push(preview, bearL)
+if draw and showFlowDots and flowLong
+    label flowL = label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.belowbar, color = colLong, style = label.style_circle, size = size.tiny)
+    if live
+        array.push(preview, flowL)
+if draw and showFlowDots and flowShort
+    label flowS = label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.abovebar, color = colShort, style = label.style_circle, size = size.tiny)
+    if live
+        array.push(preview, flowS)
+if stamp and showDiv and bullRegDiv
+    label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.belowbar, color = colAccent, style = label.style_diamond, size = size.tiny)
+if stamp and showDiv and bearRegDiv
+    label.new(bar_index, 0, "", xloc = xloc.bar_index, yloc = yloc.abovebar, color = colAccent, style = label.style_diamond, size = size.tiny)
+
+// =============================================================================
+// 9. DASHBOARD
+// =============================================================================
+
+var table dash = table.new(dashPos == "top_left" ? position.top_left : dashPos == "bottom_right" ? position.bottom_right : dashPos == "bottom_left" ? position.bottom_left : position.top_right, 2, 9, color.new(#0c0d0a, 18), color.new(#c8f542, 70), 1, color.new(#151711, 0), 1)
+
+f_cell(int r, string k, string v, color vc) =>
+    table.cell(dash, 0, r, k, text_color = colNeut, text_size = size.small, bgcolor = color.new(#0c0d0a, 18))
+    table.cell(dash, 1, r, v, text_color = vc, text_halign = text.align_right, text_size = size.small, bgcolor = color.new(#0c0d0a, 18))
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "TIDEPRINT", text_color = colAccent, text_size = size.small, bgcolor = color.new(#0c0d0a, 10))
+    table.cell(dash, 1, 0, profile, text_color = colAccent, text_halign = text.align_right, text_size = size.small, bgcolor = color.new(#0c0d0a, 10))
+    f_cell(1, "Regime", regimeStr, regimeVol ? colShort : regimeTrend ? colLong : colNeut)
+    f_cell(2, "Bias",   biasStr,   biasStr == "LONG" ? colLong : biasStr == "SHORT" ? colShort : colNeut)
+    f_cell(3, "Score L/S", str.tostring(scoreLong) + " / " + str.tostring(scoreShort), scoreLong >= minScoreLong ? colLong : scoreShort >= minScoreShort ? colShort : colNeut)
+    f_cell(4, "WT1",    str.tostring(wt1, "#.1"), wt1 > wt2 ? colLong : colShort)
+    f_cell(5, "MFI",    str.tostring(mfi, "#.1"), mfi >= 50 ? colLong : colShort)
+    f_cell(6, "CCI",    str.tostring(cci, "#.0"), cci > 0 ? colLong : colShort)
+    f_cell(7, "ADX/ER", str.tostring(adx, "#.0") + " / " + str.tostring(er, "#.22"), regimeTrend ? colLong : colNeut)
+    f_cell(8, "HTF " + htfTf, htfBull ? "BULL" : htfBear ? "BEAR" : "FLAT", htfBull ? colLong : htfBear ? colShort : colNeut)
+
+// =============================================================================
+// 10. ALERTS  (each alertcondition = 1 plot count — keep the useful set)
+// =============================================================================
+
+alertcondition(tideLong,  "Tide Long",  "Tideprint LONG  {{ticker}} {{interval}} close={{close}} score={{plot(\"Score Long\")}}")
+alertcondition(tideShort, "Tide Short", "Tideprint SHORT {{ticker}} {{interval}} close={{close}} score={{plot(\"Score Short\")}}")
+alertcondition(stLong,    "ST Long",    "Tideprint ST LONG {{ticker}} {{interval}}")
+alertcondition(stShort,   "ST Short",   "Tideprint ST SHORT {{ticker}} {{interval}}")
+alertcondition(flowLong,  "Flow Long",  "Tideprint FLOW LONG (WT+MFI) {{ticker}} {{interval}}")
+alertcondition(flowShort, "Flow Short", "Tideprint FLOW SHORT (WT+MFI) {{ticker}} {{interval}}")
+alertcondition(bearPrint, "Bear",       "Tideprint BEAR {{ticker}} {{interval}}")
+alertcondition(bullRegDiv,"Bull divergence", "Tideprint bullish WT divergence {{ticker}}")
+alertcondition(bearRegDiv,"Bear divergence", "Tideprint bearish WT divergence {{ticker}}")
+alertcondition(tideLong or stLong or flowLong or xLong,   "Any long",  "Tideprint any-long {{ticker}} {{interval}}")
+alertcondition(tideShort or stShort or flowShort or bearPrint or xShort, "Any short", "Tideprint any-short {{ticker}} {{interval}}")
+
+if barstate.isconfirmed and (tideLong or tideShort or stLong or stShort or flowLong or flowShort or bearPrint or bullRegDiv or bearRegDiv)
+    alert('{"ticker":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","close":' + str.tostring(close) + ',"scoreL":' + str.tostring(scoreLong) + ',"scoreS":' + str.tostring(scoreShort) + ',"event":"' + (tideLong ? "TIDE_LONG" : tideShort ? "TIDE_SHORT" : stLong ? "ST_LONG" : stShort ? "ST_SHORT" : flowLong ? "FLOW_LONG" : flowShort ? "FLOW_SHORT" : bearPrint ? "BEAR" : bullRegDiv ? "DIV_BULL" : "DIV_BEAR") + '"}', alert.freq_once_per_bar_close)
