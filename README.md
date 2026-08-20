@@ -1,4 +1,4 @@
-# Tideprint Pine v6.1
+# Tideprint Pine v6.2
 
 Successor to Wen2Trade. Overlay confluence for crypto.
 
@@ -24,4 +24,17 @@ If `plot(showVWAP` sits near line 49, it is still the fragment. Delete that tab 
 
 | File | What |
 | --- | --- |
-| [tideprint.pine](https://github.com/Fiasco1023/tideprint/blob/main/tideprint.pine) | Full v6.1 script (labels instead of plotshape, plot-count ~30 / 64) |
+| [tideprint.pine](https://github.com/Fiasco1023/tideprint/blob/main/tideprint.pine) | Full v6.2 script — ST Long is original Super Long (purple L) (labels instead of plotshape, plot-count ~30 / 64) |
+
+## v6.2 — ST Long is the original Super Long
+
+Wen2Trade's plotted Super Long was `STLong` (purple **L**), not the MACD `SUPERLONG` print.
+
+ST Long now fires when:
+
+- CCI (50) crosses above 0
+- fast HMA (6) is above mid HMA (12)
+- fast HMA is above SuperTrend 1, 2, and 3
+- bull candle (close > open)
+
+Removed: HTF CCI gate, all-three SuperTrend *direction* flag, shared 5-bar cooldown (those were eating daily BTC prints).

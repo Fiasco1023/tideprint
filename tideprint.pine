@@ -13,7 +13,7 @@
 // Tideprint does NOT clone Market Cipher B visuals or any closed-source formula.
 //
 // Signals fire on confirmed bars by default (no lookahead, no HTF leak).
-// v6.1 — plot-count fix (RE10140). Signals are labels, not plotshape.
+// v6.2 — ST Long restored to original Wen2Trade Super Long DNA (CCI zero-cross + HMA above all 3 STs).
 //         Const-color plots, no color?na ternaries, data-window trimmed.
 
 //@version=6
@@ -272,13 +272,18 @@ bool regimeOkL = not useRegime or regimeTrend
 bool regimeOkS = not useRegime or regimeTrend
 bool sessOk    = inSession
 
-// Continuation family (original Super Long / SHORT100 DNA, cleaned)
+// Continuation family (original SUPERLONG / SHORT100 DNA — MACD zero, not the primary print)
 bool tideLongRaw  = ta.crossover(macdPct, 0) and scoreLong >= minScoreLong and ema3 > ema6 and hFast > ema6 and cci > 0 and t1 > t2 and volOk and regimeOkL and sessOk and (not adaptiveST or not regimeVol)
 bool tideShortRaw = ta.crossunder(macdPct, 0) and scoreShort >= minScoreShort and hFast < st3 and hFast < st1 and close < open and volOk and regimeOkS and sessOk and (not adaptiveST or not regimeVol)
 
-// Original ST family: SuperTrend alignment + CCI zero + HTF money-flow
-bool stLongRaw  = ta.crossover(cci, 0) and htfCci > 0 and hFast > hMid and stBull and close > open and sessOk
-bool stShortRaw = ta.crossunder(cci, 0) and htfCci < 0 and hFast < hMid and stBear and close < open and sessOk
+// ST Long = original plotted Super Long (STLong / Long3min + ST BUY).
+// Original TFccibuy used chart CCI (always true on the crossover bar) — do not require HTF CCI.
+// Original compared HMA to the three SuperTrend *lines*, not all-three *direction* flags.
+// No shared cooldown: a flow dot must not eat the Super Long.
+bool hmaAboveST = hFast > st1 and hFast > st2 and hFast > st3
+bool hmaBelowST = hFast < st1 and hFast < st2 and hFast < st3
+bool stLongRaw  = ta.crossover(cci, 0) and hFast > hMid and hmaAboveST and close > open and sessOk
+bool stShortRaw = ta.crossunder(cci, 0) and hFast < hMid and hmaBelowST and sessOk
 
 // Structure X: inner SuperTrend flipping through outer (original SupertrendUp/Down)
 bool xLongRaw  = ta.crossunder(st3, st1) and dir1 < 0 and close > open and cci > 0
@@ -299,17 +304,17 @@ bool cdShort = bar_index - lastShortBar >= cooldown
 
 bool tideLong  = tideLongRaw  and barReady and cdLong
 bool tideShort = tideShortRaw and barReady and cdShort
-bool stLong    = stLongRaw    and barReady and cdLong
-bool stShort   = stShortRaw   and barReady and cdShort
+bool stLong    = stLongRaw    and barReady
+bool stShort   = stShortRaw   and barReady
 bool xLong     = xLongRaw     and barReady
 bool xShort    = xShortRaw    and barReady
 bool flowLong  = flowLongRaw  and barReady
 bool flowShort = flowShortRaw and barReady
 bool bearPrint = bearRaw      and barReady and cdShort
 
-if tideLong or stLong or flowLong
+if tideLong or flowLong
     lastLongBar := bar_index
-if tideShort or stShort or bearPrint or flowShort
+if tideShort or bearPrint or flowShort
     lastShortBar := bar_index
 
 // =============================================================================
@@ -444,11 +449,11 @@ if draw and showTidePrints and tideShort
     if live
         array.push(preview, tideS)
 if draw and showSTPrints and stLong
-    label stL = label.new(bar_index, 0, "ST", xloc = xloc.bar_index, yloc = yloc.belowbar, color = #e597ff, style = label.style_label_up, textcolor = color.white, size = size.tiny)
+    label stL = label.new(bar_index, 0, "L", xloc = xloc.bar_index, yloc = yloc.belowbar, color = #e597ff, style = label.style_label_up, textcolor = color.white, size = size.normal, tooltip = "ST Long — original Super Long (CCI cross 0, HMA above all 3 SuperTrends)")
     if live
         array.push(preview, stL)
 if draw and showSTPrints and stShort
-    label stS = label.new(bar_index, 0, "ST", xloc = xloc.bar_index, yloc = yloc.abovebar, color = #ff9797, style = label.style_label_down, textcolor = color.white, size = size.tiny)
+    label stS = label.new(bar_index, 0, "ST", xloc = xloc.bar_index, yloc = yloc.abovebar, color = #ff9797, style = label.style_label_down, textcolor = color.white, size = size.normal, tooltip = "ST Short — original (CCI lose 0, HMA below all 3 SuperTrends)")
     if live
         array.push(preview, stS)
 if draw and showStructX and xLong
@@ -504,7 +509,7 @@ if showDash and barstate.islast
 
 alertcondition(tideLong,  "Tide Long",  "Tideprint LONG  {{ticker}} {{interval}} close={{close}} score={{plot(\"Score Long\")}}")
 alertcondition(tideShort, "Tide Short", "Tideprint SHORT {{ticker}} {{interval}} close={{close}} score={{plot(\"Score Short\")}}")
-alertcondition(stLong,    "ST Long",    "Tideprint ST LONG {{ticker}} {{interval}}")
+alertcondition(stLong,    "ST Long",    "Tideprint ST LONG (original Super Long) {{ticker}} {{interval}}")
 alertcondition(stShort,   "ST Short",   "Tideprint ST SHORT {{ticker}} {{interval}}")
 alertcondition(flowLong,  "Flow Long",  "Tideprint FLOW LONG (WT+MFI) {{ticker}} {{interval}}")
 alertcondition(flowShort, "Flow Short", "Tideprint FLOW SHORT (WT+MFI) {{ticker}} {{interval}}")
